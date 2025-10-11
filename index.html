@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>감정일기 웹앱 — Russell 28 + 한국어 어미/강도 + 누적</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  :root { color-scheme: light; }
+  body{font-family: system-ui, "Noto Sans KR", sans-serif; margin:0; background:#f8fafc; color:#0f172a}
+  .wrap{max-width:1100px; margin:24px auto; background:#fff; border-radius:16px; box-shadow:0 6px 24px rgba(2,6,23,.06); padding:24px}
+  h1{margin:0 0 8px; font-size:24px; color:#334155}
+  .row{display:flex; gap:16px; flex-wrap:wrap}
+  .col{flex:1 1 380px; min-width:320px}
+  textarea{width:100%; min-height:120px; padding:12px; border:1px solid #e2e8f0; border-radius:12px; font-size:15px; outline:none}
+  textarea:focus{border-color:#6366f1; box-shadow:0 0 0 4px rgba(99,102,241,.15)}
+  .btn{appearance:none; border:0; border-radius:12px; padding:10px 16px; cursor:pointer; font-weight:600}
+  .btn-primary{background:#4f46e5; color:#fff}
+  .btn-primary:hover{background:#4338ca}
+  .btn-warn{background:#fde68a; color:#111827}
+  .btn-warn:hover{background:#fcd34d}
+  .opts label{display:flex; align-items:center; gap:8px; margin:6px 0; font-size:14px}
+  .card{background:#f9fafb; border:1px solid #e5e7eb; border-radius:14px; padding:12px}
+  .kpi{font-weight:700; color:#0f172a}
+  .muted{color:#64748b}
+  canvas{display:block; width:100%; height:360px; max-height:360px}
+  .charts{display:grid; grid-template-columns:1fr 1fr; gap:16px}
+  @media (max-width: 900px){ .charts{grid-template-columns:1fr} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>감정일기 웹앱 (Russell 28 + 한국어 어미/강도 + 누적)</h1>
+  <p class="muted">각 줄에 <b>날짜 + 공백 + 내용</b> (예: <code>9.1 너무 피곤했지만 아주 뿌듯했다</code>) 로 입력하고 <b>분석 실행</b>을 누르세요.</p>
+
+  <div class="row">
+    <div class="col">
+      <div class="card">
+        <textarea id="diaryInput" placeholder="예) 9.1 너무 피곤했지만 아주 뿌듯했다&#10;9.2 조금 슬펐는데 금방 기뻤다"></textarea>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px">
+          <button id="btnAnalyze" class="btn btn-primary">분석 실행</button>
+          <button id="btnFlush" class="btn btn-warn">누적 비움</button>
+        </div>
+        <div class="opts" style="margin-top:8px">
+          <label><input id="accumulate" type="checkbox" checked> 일기 입력을 누적 저장 (브라우저 로컬, 7개 점 표시 권장)</label>
+          <label><input id="limit7" type="checkbox" checked> 차트는 최근 7개 기록만 사용</label>
+          <label><input id="useExtraLexicon" type="checkbox" checked> 추가 긍/부정 단어 목록(문장형) 반영 → 타임라인 비율</label>
+        </div>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <div id="summary" class="muted">분석 결과 요약이 여기에 표시됩니다.</div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="card">
+        <b>타임라인 (긍/부정 비율)</b>
+        <div style="position:relative">
+          <canvas id="timelineChart"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="charts" style="margin-top:16px">
+    <div class="card">
+      <b>러셀 원형 — 28 감정 앵커 & 일기 평균점</b>
+      <div style="position:relative">
+        <canvas id="circumplexChart"></canvas>
+      </div>
+      <div class="muted" style="font-size:12px; margin-top:6px">원(반지름=1), x=Valence(쾌/불쾌), y=Arousal(각성/이완). 앵커는 회색, 각 일기 평균점은 파란/빨간 점.</div>
+    </div>
+    <div class="card">
+      <b>디버그 · 매칭 단어</b>
+      <pre id="debugBox" style="white-space:pre-wrap; margin:0; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; color:#1f2937"></pre>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ===============================
+   0) 공통 유틸 / 로컬 저장
+=============================== */
+const $ = (q)=>document.querySelector(q);
+const LS_KEY = 'emotionDiaryLinesV1';
+function loadStoredLines(){ try{ const raw=localStorage.getItem(LS_KEY); return raw? JSON.parse(raw) : []; }catch{ return []; } }
+function saveStoredLines(lines){ try{ localStorage.setItem(LS_KEY, JSON.stringify(lines)); }catch{} }
+function addLinesToStore(newLines){ const cur=loadStoredLines(); const merged=cur.concat(newLines); saveStoredLines(merged); return merged; }
+function clearStoredLines(){ try{ localStorage.removeItem(LS_KEY);}catch{} }
+
+function resetCanvas(id){
+  const old = document.getElementById(id);
+  if(!old) return null;
+  const p = old.parentNode;
+  const neo = old.cloneNode(false);
+  p.replaceChild(neo, old);
+  return neo.getContext('2d');
+}
+
+/* ===============================
+   1) 한국어 전처리 / 스테밍 / 강도
+=============================== */
+function normalizeKorean(text){
+  return (text||'')
+    .replace(/[.,!?;:"'`~\[\]\(\)\{\}<>\/\|\\\-]+/g,' ')
+    .replace(/\s+/g,' ')
+    .trim();
+}
+
+// 자주 쓰이는 동사/형용사 어미·어간 변형을 소거(간단 스테밍)
+const ENDINGS = [
+  "했습니다","했습니까","했습니다만","했습니다요","했습니다요","했어요","했어","했다","하였다",
+  "하세요","하셨다","하시네요","하네요","하네","하자","한다","한다는","한다고","한다면","한다면요","한다니까",
+  "합니다","합니까","합니다만","해요","해","함","했네요","했던","했을","하게","하게요","하였음","하였다가",
+  "스럽다","스러웠다","스러워요","스러웠어요","스럽네요","스럽고","스럽지만"
+];
+function stemKorean(w){
+  let s = w;
+  for(const e of ENDINGS){ if(s.endsWith(e)) return s.slice(0, -e.length); }
+  return s;
+}
+
+// 강도 수식어
+const STRENGTH_MODIFIERS = {
+  strong: ["매우","아주","정말","너무","완전","굉장히","대단히","진짜","참으로","엄청","무척"],
+  weak:   ["조금","약간","살짝","다소","그럭저럭","조금은","조금이라도","살짝은"]
+};
+
+/* ===============================
+   2) Russell 28 감정 앵커 (1~9 → -1~+1)
+=============================== */
+const EMOTIONS_28 = [
+  {"name":"excited","kw":["신나다","들뜨다","흥분하다","짜릿하다"],"val_9":9,"aro_9":9},
+  {"name":"elated","kw":["희열","황홀","들뜸","들떴다"],"val_9":9,"aro_9":8},
+  {"name":"enthusiastic","kw":["열정적","의욕적","열의","의욕"],"val_9":8,"aro_9":8},
+  {"name":"happy","kw":["행복하다","행복","기쁘다","기쁨"],"val_9":9,"aro_9":7},
+  {"name":"joyful","kw":["즐겁다","유쾌하다","즐거움"],"val_9":8,"aro_9":7},
+  {"name":"proud","kw":["뿌듯하다","자랑스럽다","성취감"],"val_9":8,"aro_9":6},
+  {"name":"grateful","kw":["감사하다","고맙다","감사"],"val_9":8,"aro_9":5},
+  {"name":"content","kw":["만족하다","만족","흐뭇하다"],"val_9":8,"aro_9":3},
+  {"name":"relaxed","kw":["편안하다","편안","이완","느긋하다"],"val_9":8,"aro_9":3},
+  {"name":"calm","kw":["차분하다","고요하다","평온하다","평온"],"val_9":8,"aro_9":2},
+  {"name":"serene","kw":["안온하다","온화하다","온화"],"val_9":7,"aro_9":2},
+  {"name":"secure","kw":["안정되다","안정감","안도"],"val_9":7,"aro_9":3},
+  {"name":"angry","kw":["화나다","분노하다","격분","성난"],"val_9":2,"aro_9":9},
+  {"name":"annoyed","kw":["짜증","짜증나다","거슬리다"],"val_9":3,"aro_9":7},
+  {"name":"tense","kw":["긴장","긴장되다","팽팽하다"],"val_9":3,"aro_9":8},
+  {"name":"stressed","kw":["스트레스","압박감","과부하"],"val_9":2,"aro_9":8},
+  {"name":"afraid","kw":["두렵다","겁나다","공포","겁"],"val_9":2,"aro_9":9},
+  {"name":"anxious","kw":["불안","불안하다","초조","초조하다"],"val_9":3,"aro_9":8},
+  {"name":"guilty","kw":["죄책감","미안하다","가책"],"val_9":3,"aro_9":6},
+  {"name":"sad","kw":["슬프다","슬픔"],"val_9":2,"aro_9":2},
+  {"name":"depressed","kw":["우울","우울하다","침울","침잠"],"val_9":2,"aro_9":2},
+  {"name":"tired","kw":["피곤","피곤하다","지치다","탈진"],"val_9":3,"aro_9":2},
+  {"name":"bored","kw":["지루하다","심심하다","권태","권태롭다"],"val_9":3,"aro_9":1},
+  {"name":"lonely","kw":["외롭다","고독","쓸쓸하다"],"val_9":3,"aro_9":2},
+  {"name":"disappointed","kw":["실망","실망하다","허탈"],"val_9":3,"aro_9":3},
+  {"name":"surprised+","kw":["놀라다","놀람(좋은)","뜻밖(좋은)"],"val_9":6,"aro_9":8},
+  {"name":"surprised-","kw":["경악","경악하다","놀람(나쁜)"],"val_9":4,"aro_9":8},
+  {"name":"interested","kw":["관심","흥미","흥미롭다"],"val_9":6,"aro_9":6},
+  {"name":"hopeful","kw":["희망","희망적","기대되다"],"val_9":7,"aro_9":5}
+];
+const KW2COORD = new Map();
+for(const e of EMOTIONS_28){
+  for(const k of e.kw){
+    const s = stemKorean(k);
+    KW2COORD.set(s, {v9:e.val_9, a9:e.aro_9, name:e.name});
+  }
+}
+const nineToStd = (x)=> ((x-1)/8)*2 - 1;
+
+/* ===============================
+   3) 추가 긍/부정(문장형) 사전  — 타임라인에 반영
+   (네가 준 긴 목록 그대로 포함)
+=============================== */
+const POS_EXTRA = [  "행복했다", "기뻤다", "즐거웠다", "사랑스러웠다", "만족했다", "편안했다", "희망찼다", "설렜다", "감사했다", "웃음이 났다",
+  "성취감이 들었다", "용기가 났다", "열정적이었다", "기분이 좋았다", "기대됐다", "편효로웠다", "행운이었다", "신났다", "자부심이 들었다", "활기찼다",
+  "기뻤다", "출출했다", "명랑했다", "재미있었다", "따뜻했다", "기운이 났다", "환호했다", "사랑받는 느낌이었다", "필요했다", "든든했다",
+  "건강했다", "대화됐다", "든든했다", "멋졌다", "신뢰됐다", "흠미로웠다", "소중하게 느껴졌다", "달콤했다", "사려깊었다", "훈훈했다",
+  "믿음이 느껴졌다", "미소 지었다", "즐거움이었다", "재치 있었다", "자유로웠다", "친근했다", "편리했다", "빛났다", "맑았다",
+  "행복 느낌", "환사했다", "기대됐다", "상쾌했다", "괜찮았다", "정성스러웠다", "긍정적이었다", "기분탓다", "따뜻한 마음이 들었다", "활기차게 보냈다",
+  "효율적이었다", "자유로움 있었다", "안심됐다", "유쾌했다", "활발했다", "맑고 깨끗했다", "성장하는 기분이었다", "의미 있었다", "평화롭게 느껴졌다", "긍정적",
+  "보람찼다", "믿을 수 있었다", "성공했다", "이해됐다", "기운이 넘쳤다", "힘이 솟았다", "감동적이었다", "공감됐다", "도움됐다", "신뢰할 수 있었다",
+  "동의했다", "진철했다", "진절했다", "행운이었다", "희망이 보였다", "칭찬받았다", "의미있었다", "재미있게 지냈다", "표현할 수 있었다", "적극적이었다",
+  "사려 깊었다", "친절했다", "차분했다", "긍정 감정을 느꼈다", "이해받았다", "온화했다", "효과적이었다", "격려했다", "자신감을 얻었다", "자유롭게 생각했다",
+  "소통이 원활했다", "사랑스러웠다", "자신감 넘쳤다", "자신감이 넘쳤다", "따뜻하게 느껴졌다", "감탄했다", "의미가 깊었다", "칭찬을 받았다", "의미 있는 하루였다",
+  "기대가 컸다", "뿌듯했다", "희망을 가졌다", "영감을 받았다", "기분이 넘쳤다", "유쾌한 하루였다", "명랑했다", "축복받은 느낌이었다", "공감 받았다", "의미 있었다",
+  "기쁨에 차 있었다", "감동했다", "보람 있었다", "괜찮은 하루였다", "좋았다", "감동받았다", "용기를 얻었다", "성취했다", "기분 좋게 보냈다", "칭찬받았다",
+  "자신감 있었다", "자랑스러웠다", "행운이었다", "편했다", "성취감을 느꼈다", "배려심 있었다", "적직했다", "멋진 하루였다", "보람 있었다", "자신감을 보였다",
+  "기대에 차 있었다", "위로받았다", "평화로웠다", "감사함을 느꼈다", "응원받았다", "격려받았다", "의욕이 생겼다", "활기찼다", "적극적으로 행동했다", "신뢰가 갔다",
+  "희망이 있었다", "행복하게 느껴졌다", "의미 있게 보냈다", "행운이었다", "감정적으로 풍부했다", "활동적이었다", "사랑을 느꼈다", "자유를 느꼈다", "존중받았다", "기회였다",
+  "응원이 느껴졌다", "편안히 쉴 수 있었다", "도움이 되었다", "이해할 수 있었다", "성취감 있었다", "좋은 하루였다", "성장할 수 있었다", "인정받았다", "잘 지냈다", "기분이 나아졌다",
+  "이해받은 느낌이었다", "가슴이 벅찼다", "성장하는 하루였다", "좋은 감정이었다", "기쁘게 마쳤다", "기억에 남았다", "안정감 있었다", "기분이 편안했다", "하루가 뿌듯했다", "자유롭게 느꼈다",
+  "감사한 하루였다", "좋은 추억이 되었다", "칭찬했다", "긍정적인 영향을 받았다", "평화로운 분위기였다", "의미 있는 경험이었다", "기대만큼 좋았다", "다정했다", "따뜻한 하루였다", "성취한 하루였다",
+  "잘 해냈다", "의미가 있었다", "감탄스러웠다", "자신 있는 하루였다", "가치 있었다", "자유로웠다", "적극적이었다", "기대 이상이었다", "칭찬해주었다", "마음이 따뜻했다", "자유롭게 말했다",
+  "성장한 기분이었다", "뿌듯한 하루였다", "긍정적인 피드백을 받았다", "명확했다", "도움이 되었다", "격려를 받았다", "따뜻한 말이었다", "기대에 부응했다", "가치 있는 하루였다", "보람 있는 하루였다",
+  "칭찬의 말이었다", "마음이 편했다", "응원해주었다", "긍정적인 태도였다", "사랑이 느껴졌다", "하루가 충실했다", "기쁨으로 가득 찼다", "성취가 있었다", "편안한 기분이었다", "응원의 말이었다",
+  "의미 있는 말이었다", "성취의 기쁨이었다", "희망찬 하루였다", "긍정적 감정이었다", "마음이 따뜻해졌다", "기분 좋은 하루였다", "성장의 하루였다", "좋은 피드백이었다", "인정해주었다", "기쁨의 하루였다" ];
+
+const NEG_EXTRA = [  "불쾌했다", "화가 났다", "좌절했다", "불안했다", "짜증났다", "외로웠다", "두려웠다", "공포스러웠다", "분노했다", "후회했다",
+  "피곤했다", "지쳤다", "슬펐다", "속상했다", "실망했다", "불편했다", "무기력했다", "혐오스러웠다", "혐오했다", "울고 싶었다",
+  "비참했다", "초조했다", "우울했다", "울적했다", "실의에 빠졌다", "억울했다", "패배했다", "당황스러웠다", "불행했다", "좌절스러웠다",
+  "속상함이 컸다", "시무룩했다", "긴장됐다", "서운했다", "걱정됐다", "고통스러웠다", "미웠다", "섭섭했다", "부끄러웠다", "혼란스러웠다",
+  "무서웠다", "창피했다", "비관적이었다", "혼자였다", "우울한 기분이었다", "억울함이 남았다", "애매했다", "어색했다", "자괴감", "자기혐오",
+  "침울했다", "비통했다", "의욕이 없었다", "허탈했다", "불편한 하루였다", "무력했다", "실패했다", "공허했다", "실망감이 들었다", "우울감을 느꼈다",
+  "절망했다", "초조함이 컸다", "불편하게 느껴졌다", "지치고 힘들었다", "한숨이 나왔다", "부정적이었다", "분노가 치밀었다", "심란했다", "혼란됐다", "두려움이 컸다",
+  "속상함이 많았다", "머리가 아팠다", "집중이 안됐다", "피곤한 하루였다", "답답했다", "좌절감이 있었다", "불안감이 컸다", "후회되는 하루였다", "혼란한 하루였다", "무력한 하루였다",
+  "지옥 같았다", "불쾌한 기억이었다", "억압됐다", "비참한 기분이었다", "불행한 날이었다", "울컥했다", "분노로 가득찼다", "기운이 없었다", "힘들었다", "아팠다",
+  "화가 치밀었다", "비관적으로 생각했다", "짜증나는 하루였다", "절망감에 빠졌다", "눈물이 났다", "자책했다", "우울한 하루였다", "슬픈 하루였다", "충격이었다", "모욕감을 느꼈다",
+  "실망스러웠다", "공허함을 느꼈다", "혐오감을 느꼈다", "혼란감이 들었다", "좌절스러웠다", "불행하게 느꼈다", "서럽게 울었다", "눈물 흘렸다", "울었다", "고통스러웠다",
+  "슬픔이 가득했다", "분노에 찼다", "피곤이 쌓였다", "심적으로 지쳤다", "의욕이 사라졌다", "희망이 없었다", "절망에 빠졌다", "무기력에 빠졌다", "의미 없었다", "하루가 괴로웠다",
+  "짜증스러웠다", "소외감이 들었다", "이해받지 못했다", "서운한 하루였다", "무기력한 하루였다", "속상했던 하루였다", "지긋지긋했다", "우울한 기분이 들었다", "지겹다", "포기하고 싶었다",
+  "슬픈 생각이 들었다", "무시당했다", "혐오를 느꼈다", "고통스러운 기억이었다", "실망한 하루였다", "절망적인 하루였다", "지옥 같았다", "나쁜 하루였다", "힘이 빠졌다", "마음이 무거웠다",
+  "실망감을 느꼈다", "자존감이 낮아졌다", "상처받았다", "의기소침했다", "상심했다", "슬픈 일이었다", "불만이었다", "분노가 가득했다", "실패한 하루였다", "공포에 시달렸다",
+  "우울함에 잠겼다", "비참하게 느껴졌다", "후회스러웠다", "상처받은 하루였다", "마음이 무너졌다", "절망의 하루였다", "자신을 탓했다", "자신이 싫었다", "무력함이 밀려왔다", "혼란이 가득했다",
+  "지치고 힘들었다", "무기력감이 컸다", "좌절의 하루였다", "피곤하고 불편했다", "불쾌하게 느껴졌다", "속이 상했다", "걱정이 계속됐다", "자신을 책망했다", "부정적인 생각이 들었다", "초조하게 느껴졌다",
+  "막막했다", "불쾌했다", "두려워졌다", "피하고 싶었다", "상처받았다", "실연했다", "힘들게 느껴졌다", "외로움이 컸다", "버거웠다",
+  "가슴 아팠다", "실패했다고 느꼈다", "슬프고 외로웠다", "분노스러웠다", "억울하다고 느꼈다", "마음이 복잡했다", "생각이 많았다", "기대와 달랐다", "혼자라 느꼈다", "불편한 기분이었다",
+  "눈물이 많았다", "아무 의미 없었다", "좌절되었다", "상심이 컸다", "속상한 일이었다", "힘든 하루였다", "한숨만 나왔다", "속상함으로 가득찼다" ];
+
+/* ===============================
+   4) 감정 인식 (Russell 28 + 추가사전 가중치)
+=============================== */
+// Russell 28 매칭 (형태가 조금 달라도 포함 매칭)
+function analyzeRussell(text){
+  const toks = normalizeKorean(text).split(' ').filter(Boolean);
+  const hits = [];
+  for(const t of toks){
+    const st = stemKorean(t);
+    for(const [kw, info] of KW2COORD.entries()){
+      if(st.includes(kw)){ // 부분 포함 매칭
+        hits.push({ token:t, name:info.name, val9:info.v9, aro9:info.a9,
+                    val_std:nineToStd(info.v9), aro_std:nineToStd(info.a9) });
+        break;
+      }
+    }
+  }
+  const vals = hits.map(h=>h.val9), aros = hits.map(h=>h.aro9);
+  const val9 = vals.length? vals.reduce((a,b)=>a+b,0)/vals.length : 5;
+  const aro9 = aros.length? aros.reduce((a,b)=>a+b,0)/aros.length : 5;
+  return {
+    val9, aro9, val_std:nineToStd(val9), aro_std:nineToStd(aro9),
+    hits, matched_emotions: hits.map(h=>h.name).join(',')
+  };
+}
+
+// 추가 사전(문장형) + 강도 가중치 → 타임라인 비율에만 사용
+function detectWeightedSentiments(text, posList, negList){
+  const tokens = normalizeKorean(text).split(' ').filter(Boolean);
+  let pos=0, neg=0; const matchedPos=[], matchedNeg=[];
+  let currentWeight = 1.0;
+
+  for(const raw of tokens){
+    const stem = stemKorean(raw);
+    if (STRENGTH_MODIFIERS.strong.includes(stem)){ currentWeight=2.0; continue; }
+    if (STRENGTH_MODIFIERS.weak.includes(stem)){ currentWeight=0.5; continue; }
+
+    let found = false;
+    for (const w of posList){
+      if(stem.includes(stemKorean(w))){ pos += currentWeight; matchedPos.push(`${w}(${currentWeight}x)`); found = true; break; }
+    }
+    if(found){ currentWeight = 1.0; continue; }
+    for (const w of negList){
+      if(stem.includes(stemKorean(w))){ neg += currentWeight; matchedNeg.push(`${w}(${currentWeight}x)`); found = true; break; }
+    }
+    if(found){ currentWeight = 1.0; }
+  }
+  return {pos,neg,matchedPos,matchedNeg};
+}
+
+/* ===============================
+   5) 메인 분석 흐름
+=============================== */
+let chartTimeline=null, chartCircumplex=null;
+let RESULTS = { rows: [], hits: [] };
+
+function parseLine(line){
+  const trimmed = line.trim();
+  if(!trimmed) return null;
+  const sp = trimmed.split(' ');
+  if(sp.length<2) return null;
+  const date = sp[0]; // 9.1 또는 2025.09.01
+  const text = sp.slice(1).join(' ');
+  return {date, text};
+}
+
+function analyze(){
+  const linesNew = ($('#diaryInput').value||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  const doAccum = $('#accumulate').checked;
+  let effective = linesNew;
+
+  if(doAccum){
+    effective = addLinesToStore(linesNew);
+    $('#diaryInput').value = '';
+  }
+
+  const rowsAll = [];
+  const debugLines = [];
+
+  for(const line of effective){
+    const parsed = parseLine(line);
+    if(!parsed) continue;
+
+    // (a) Russell 28로 평균 좌표 + 히트 리스트
+    const r28 = analyzeRussell(parsed.text);
+
+    // (b) 추가 사전 + 강도 가중치로 긍/부정 비율
+    let pos=0,neg=0,matchedPos=[],matchedNeg=[];
+    if($('#useExtraLexicon').checked){
+      const ex = detectWeightedSentiments(parsed.text, POS_EXTRA, NEG_EXTRA);
+      pos = ex.pos; neg = ex.neg; matchedPos = ex.matchedPos; matchedNeg = ex.matchedNeg;
+    }
+    // Russell 히트도 긍/부정 집계에 포함하고 싶다면(선택): v>5 → pos++, v<5 → neg++
+    for(const h of r28.hits){
+      if(h.val9>5) pos += 1;
+      else if(h.val9<5) neg += 1;
+    }
+
+    const total = pos+neg;
+    const posPct = total? (pos/total*100) : 0;
+    const negPct = total? (neg/total*100) : 0;
+
+    rowsAll.push({
+      date: parsed.date,
+      posPct, negPct,
+      val_std: r28.val_std, aro_std: r28.aro_std,
+      matched_emotions: r28.matched_emotions,
+      matched_pos_extra: matchedPos.join(','),
+      matched_neg_extra: matchedNeg.join(',')
+    });
+
+    debugLines.push(`📅 ${parsed.date}
+- Russell hits: ${r28.matched_emotions||'(none)'} / avg (v=${r28.val9.toFixed(2)}, a=${r28.aro9.toFixed(2)})
+- Extra + weight: +${pos.toFixed(2)} / -${neg.toFixed(2)} → ${posPct.toFixed(1)}% / ${negPct.toFixed(1)}%
+- Extra matched +: ${matchedPos.join(', ')||'(none)'}
+- Extra matched -: ${matchedNeg.join(', ')||'(none)'}\n`);
+  }
+
+  rowsAll.sort((a,b)=> a.date.localeCompare(b.date));
+  const rows = $('#limit7').checked ? rowsAll.slice(-7) : rowsAll;
+
+  RESULTS.rows = rows;
+  $('#debugBox').textContent = debugLines.join('\n');
+
+  renderTimeline();
+  renderCircumplex();
+  renderSummary();
+}
+
+function renderSummary(){
+  const n = RESULTS.rows.length;
+  if(!n){ $('#summary').textContent = '아직 분석 결과가 없습니다. 일기를 입력하고 [분석 실행]을 누르세요.'; return; }
+  const avgPos = RESULTS.rows.reduce((s,r)=>s+r.posPct,0)/n;
+  const avgNeg = RESULTS.rows.reduce((s,r)=>s+r.negPct,0)/n;
+  $('#summary').innerHTML = `최근 <b class="kpi">${n}</b>개 일기 평균 → 
+    긍정 <b class="kpi">${avgPos.toFixed(1)}%</b>, 부정 <b class="kpi">${avgNeg.toFixed(1)}%</b>`;
+}
+
+/* ===============================
+   6) 차트 — 타임라인 / 러셀 원형
+=============================== */
+function renderTimeline(){
+  const ctx = resetCanvas('timelineChart');
+  if(chartTimeline){ try{ chartTimeline.destroy(); }catch{} }
+
+  const labels = RESULTS.rows.map(r=>r.date);
+  const pos = RESULTS.rows.map(r=>+r.posPct.toFixed(2));
+  const neg = RESULTS.rows.map(r=>+r.negPct.toFixed(2));
+
+  chartTimeline = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label:'긍정 %', data:pos, tension:.25 },
+        { label:'부정 %', data:neg, tension:.25 }
+      ]
+    },
+    options: {
+      responsive:true, maintainAspectRatio:false, animation:false,
+      interaction:{mode:'index', intersect:false},
+      plugins:{ legend:{position:'bottom'} },
+      scales:{ y:{beginAtZero:true, max:100} }
+    }
+  });
+}
+
+function renderCircumplex(){
+  const ctx = resetCanvas('circumplexChart');
+  if(chartCircumplex){ try{ chartCircumplex.destroy(); }catch{} }
+
+  // 28 감정 앵커(회색) + 일기 평균점(긍/부정 색)
+  const anchorData = EMOTIONS_28.map(e=>({
+    x: nineToStd(e.val_9), y: nineToStd(e.aro_9), label: e.name
+  }));
+  const diaryData = RESULTS.rows.map(r=>({
+    x: r.val_std, y: r.aro_std,
+    date: r.date, color: r.posPct>=r.negPct ? '#3b82f6' : '#ef4444',
+    radius: Math.max(4, Math.min(12, (r.posPct/100)*10 + 4))
+  }));
+
+  chartCircumplex = new Chart(ctx, {
+    type: 'scatter',
+    data: {
+      datasets: [
+        {
+          label:'Russell 28 앵커',
+          data: anchorData,
+          pointRadius: 3,
+          backgroundColor: 'rgba(100,116,139,.6)'
+        },
+        {
+          label:'일기 평균점',
+          data: diaryData.map(d=>({x:d.x, y:d.y})),
+          pointRadius: diaryData.map(d=>d.radius),
+          backgroundColor: diaryData.map(d=>d.color)
+        }
+      ]
+    },
+    options: {
+      responsive:true, maintainAspectRatio:false, animation:false,
+      scales:{
+        x:{ type:'linear', min:-1.05, max:1.05, title:{display:true, text:'Valence (− ← → +)'} },
+        y:{ type:'linear', min:-1.05, max:1.05, title:{display:true, text:'Arousal (↓ ← → ↑)'} }
+      },
+      plugins:{
+        legend:{position:'bottom'},
+        tooltip:{
+          callbacks:{
+            label(ctx){
+              if(ctx.datasetIndex===0){
+                const a = anchorData[ctx.dataIndex];
+                return `앵커: ${a.label} (v:${ctx.parsed.x.toFixed(2)}, a:${ctx.parsed.y.toFixed(2)})`;
+              }else{
+                const d = diaryData[ctx.dataIndex];
+                return `${d.date} (v:${ctx.parsed.x.toFixed(2)}, a:${ctx.parsed.y.toFixed(2)})`;
+              }
+            }
+          }
+        }
+      }
+    }
+  });
+
+  // 원형 가이드(원/축선)는 Chart.js 기본 그리드로 대체. 원을 추가로 그리고 싶다면 annotation 플러그인 사용 가능.
+}
+
+/* ===============================
+   7) 이벤트 바인딩
+=============================== */
+$('#btnAnalyze').addEventListener('click', analyze);
+$('#btnFlush').addEventListener('click', ()=>{
+  clearStoredLines();
+  $('#diaryInput').value='';
+  RESULTS = {rows:[], hits:[]};
+  if(chartTimeline) chartTimeline.destroy();
+  if(chartCircumplex) chartCircumplex.destroy();
+  $('#summary').textContent='누적 기록을 비웠습니다.';
+  $('#debugBox').textContent='';
+});
+</script>
+</body>
+</html>
