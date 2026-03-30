@@ -366,44 +366,46 @@
       로 입력하고 <b>분석하기</b>를 누르세요.
     </p>
 
-    <div class="row">
-      <div class="col">
-        <div class="card">
-          <h3>오늘의 감정 입력 ✏️</h3>
-          <textarea id="diaryInput" placeholder="예) 3.1 너무 피곤했지만 아주 뿌듯했다&#10;3.2 조금 슬펐는데 금방 기뻤다"></textarea>
-          <div class="btn-row">
-            <button id="btnAnalyze" class="btn btn-primary">분석하기</button>
-            <button id="btnFlush" class="btn btn-warn">내 기록 비우기</button>
-          </div>
-         <div class="opts">
-           <label>
-             <input type="checkbox">
-             입력한 일기 계속 추가하기
-          </label>
-          <label>
-            <input type="checkbox">
-            최근 7개 기록만 사용하기
-          </label>
-          <label>
-            <input type="checkbox">
-            긍/부정 단어 목록 반영 → 타임라인 비율
-          </label>
-        </div>
-
-        <div class="card" style="margin-top:12px">
-          <div id="summary" class="muted">분석 결과입니다.</div>
-        </div>
+<div class="row">
+  <div class="col">
+    <div class="card">
+      <h3>오늘의 감정 입력 ✏️</h3>
+      <textarea id="diaryInput" placeholder="예) 3.1 너무 피곤했지만 아주 뿌듯했다&#10;3.2 조금 슬펐는데 금방 기뻤다"></textarea>
+      <div class="btn-row">
+        <button id="btnAnalyze" class="btn btn-primary">분석하기</button>
+        <button id="btnFlush" class="btn btn-warn">내 기록 비우기</button>
       </div>
 
-      <div class="col">
-        <div class="card">
-          <h3>감정 타임라인 📈</h3>
-          <div style="position:relative">
-            <canvas id="timelineChart"></canvas>
-          </div>
-        </div>
+      <div class="opts">
+        <label>
+          <input type="checkbox">
+          입력한 일기 계속 추가하기
+        </label>
+        <label>
+          <input type="checkbox">
+          최근 7개 기록만 사용하기
+        </label>
+        <label>
+          <input type="checkbox">
+          긍/부정 단어 목록 반영 → 타임라인 비율
+        </label>
       </div>
     </div>
+
+    <div class="card" style="margin-top:12px">
+      <div id="summary" class="muted">분석 결과입니다.</div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="card">
+      <h3>감정 타임라인 📈</h3>
+      <div style="position:relative">
+        <canvas id="timelineChart"></canvas>
+      </div>
+    </div>
+  </div>
+</div>
 
     <div class="charts" style="margin-top:16px">
       <div class="card">
